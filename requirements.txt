@@ -1,0 +1,1 @@
+solana==0.33.0\nsolders==0.21.0\nflask==3.0.3\nrequests==2.32.3\npython-dotenv==1.0.1\ngunicorn==23.0.0
