@@ -1,251 +1,443 @@
+"""
+main.py — Solatran Twitter Bot
+Polls Twitter mentions every 60 seconds and processes commands:
+  @Solatran send 10 USDT to @someone
+  @Solatran balance
+  @Solatran deposit ETH
+  @Solatran withdraw 0.1 ETH 0xABC...
+"""
+
 import os
 import re
 import time
-import secrets
-import base64
-import hashlib
+import logging
 import requests
-import json
-from urllib.parse import urlencode
-from flask import Flask, redirect, request, session
 from dotenv import load_dotenv
-from solders.keypair import Keypair
-from solders.pubkey import Pubkey
-from solders.hash import Hash
-from solana.rpc.api import Client
-from solana.transaction import Transaction
-from solders.system_program import TransferParams, transfer
+from models import Session, User, Wallet, Transaction
+from transfer import internal_transfer, withdraw, get_all_balances, to_smallest_unit
 
 load_dotenv()
-app = Flask(__name__)
-app.secret_key = secrets.token_hex(16)
-app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
-app.config['SESSION_COOKIE_SECURE'] = False
-app.config['SESSION_COOKIE_HTTPONLY'] = True
 
-CLIENT_ID = os.getenv("TWITTER_CLIENT_ID")
+# ─── Logging ──────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("bot.log"),
+        logging.StreamHandler()
+    ]
+)
+log = logging.getLogger(__name__)
+
+# ─── Config ───────────────────────────────────────────────────────────────────
+BOT_HANDLE    = os.getenv("TWITTER_BOT_HANDLE", "Solatran")
+CLIENT_ID     = os.getenv("TWITTER_CLIENT_ID")
 CLIENT_SECRET = os.getenv("TWITTER_CLIENT_SECRET")
-REDIRECT_URL = os.getenv("TWITTER_REDIRECT_URL", "http://127.0.0.1:5000/callback")
-BOT_HANDLE = "SolatranBot"  # no @ for API queries
+POLL_INTERVAL = 60   # seconds between each mention check
+REGISTER_URL  = "https://solatran.xyz"   # update when deployed
 
-MAX_SOL = 1.0  # safety cap per transaction
-MAX_LAMPORTS = int(MAX_SOL * 1_000_000_000)
-
-# --- FIX 1: Relative keypair path ---
-KEYPAIR_PATH = os.getenv("KEYPAIR_PATH", "keypair.json")
-SOLANA_CLIENT = Client("https://api.devnet.solana.com")
-
-try:
-    with open(KEYPAIR_PATH, "r") as f:
-        secret_key = json.load(f)
-    PAYER_KEYPAIR = Keypair.from_bytes(bytes(secret_key))
-    print(f"Loaded keypair: {PAYER_KEYPAIR.pubkey()}")
-except FileNotFoundError:
-    print(f"Error: keypair not found at {KEYPAIR_PATH}")
-    PAYER_KEYPAIR = None
-
-# Track processed tweet IDs to avoid double-sending
-processed_tweets = set()
-
-
-# --- FIX 2: Fetch username from author_id ---
-def get_username(author_id, access_token):
-    url = f"https://api.twitter.com/2/users/{author_id}"
-    headers = {"Authorization": f"Bearer {access_token}"}
-    try:
-        r = requests.get(url, headers=headers, timeout=10)
-        r.raise_for_status()
-        return r.json().get("data", {}).get("username", author_id)
-    except Exception:
-        return author_id
-
-
-# --- FIX 3: Add blockhash to transaction ---
-def send_sol(recipient_pubkey: Pubkey, lamports: int):
-    blockhash_resp = SOLANA_CLIENT.get_latest_blockhash()
-    recent_blockhash = blockhash_resp.value.blockhash
-
-    instruction = transfer(TransferParams(
-        from_pubkey=PAYER_KEYPAIR.pubkey(),
-        to_pubkey=recipient_pubkey,
-        lamports=lamports
-    ))
-    transaction = Transaction()
-    transaction.recent_blockhash = recent_blockhash
-    transaction.add(instruction)
-
-    response = SOLANA_CLIENT.send_transaction(transaction, PAYER_KEYPAIR)
-    return str(response.value)
-
-
-# --- FIX 4: Proper command parsing with regex ---
+# ─── Command patterns ─────────────────────────────────────────────────────────
+# @Solatran send 10 USDT to @friend
 SEND_PATTERN = re.compile(
-    r'!send\s+([\d.]+)\s+([1-9A-HJ-NP-Za-km-z]{32,44})',
+    r'send\s+([\d.]+)\s+([A-Z]+)\s+to\s+@(\w+)',
     re.IGNORECASE
 )
+# @Solatran send 10 USDT to @friend on ethereum  (optional chain)
+SEND_WITH_CHAIN_PATTERN = re.compile(
+    r'send\s+([\d.]+)\s+([A-Z]+)\s+to\s+@(\w+)\s+on\s+(\w+)',
+    re.IGNORECASE
+)
+# @Solatran withdraw 0.1 ETH 0xABC...
+WITHDRAW_PATTERN = re.compile(
+    r'withdraw\s+([\d.]+)\s+([A-Z]+)\s+([A-Za-z0-9]{20,})',
+    re.IGNORECASE
+)
+# @Solatran deposit ETH
+DEPOSIT_PATTERN = re.compile(
+    r'deposit(?:\s+([A-Z]+))?',
+    re.IGNORECASE
+)
+# @Solatran balance
+BALANCE_PATTERN = re.compile(r'balance', re.IGNORECASE)
 
 
-def process_tweets(tweets, access_token):
-    if not PAYER_KEYPAIR:
-        return ["Error: keypair not loaded"]
+# ─── Twitter API helpers ──────────────────────────────────────────────────────
 
-    results = []
-    for tweet in tweets:
-        tweet_id = tweet.get("id")
-        tweet_text = tweet.get("text", "")
-        author_id = tweet.get("author_id")
-
-        if tweet_id in processed_tweets:
-            continue
-        processed_tweets.add(tweet_id)
-
-        match = SEND_PATTERN.search(tweet_text)
-        if not match:
-            results.append(f"Ignored: {tweet_text[:60]}")
-            continue
-
-        amount_sol = float(match.group(1))
-        recipient_str = match.group(2)
-        lamports = int(amount_sol * 1_000_000_000)
-
-        # FIX 5: Enforce max limit
-        if lamports > MAX_LAMPORTS:
-            reply_text = f"@{get_username(author_id, access_token)} ❌ Max is {MAX_SOL} SOL per transaction."
-            post_reply(reply_text, tweet_id, access_token)
-            results.append(f"Rejected oversized tx: {amount_sol} SOL")
-            continue
-
-        try:
-            recipient_pubkey = Pubkey.from_string(recipient_str)
-            signature = send_sol(recipient_pubkey, lamports)
-            username = get_username(author_id, access_token)
-            reply_text = f"@{username} ✅ Sent {amount_sol} SOL! Tx: {signature}"
-            post_reply(reply_text, tweet_id, access_token)
-            results.append(f"Sent {amount_sol} SOL → {signature}")
-
-        except ValueError as e:
-            reply_text = f"@{get_username(author_id, access_token)} ❌ Invalid address."
-            post_reply(reply_text, tweet_id, access_token)
-            results.append(f"Error (address): {e}")
-        except Exception as e:
-            results.append(f"Error (tx): {e}")
-
-    return results
+def get_headers(access_token: str) -> dict:
+    return {"Authorization": f"Bearer {access_token}"}
 
 
-def post_reply(text, in_reply_to_id, access_token):
-    url = "https://api.twitter.com/2/tweets"
-    headers = {
-        "Authorization": f"Bearer {access_token}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "text": text,
-        "reply": {"in_reply_to_tweet_id": in_reply_to_id}
-    }
+def get_access_token() -> str | None:
+    """
+    Get a bot-level access token using OAuth 2.0 client credentials.
+    This is used for reading mentions. For posting replies, we need
+    the user access token obtained via the OAuth flow in register.py.
+    """
+    import base64
+    url = "https://api.twitter.com/oauth2/token"
+    auth = base64.b64encode(f"{CLIENT_ID}:{CLIENT_SECRET}".encode()).decode()
     try:
-        r = requests.post(url, json=payload, headers=headers, timeout=10)
+        r = requests.post(url,
+            data={"grant_type": "client_credentials"},
+            headers={
+                "Authorization": f"Basic {auth}",
+                "Content-Type": "application/x-www-form-urlencoded"
+            },
+            timeout=10
+        )
         r.raise_for_status()
+        return r.json().get("access_token")
     except Exception as e:
-        print(f"Failed to reply: {e}")
+        log.error(f"Failed to get access token: {e}")
+        return None
 
 
-def get_tweets(access_token, since_id=None):
+def get_mentions(access_token: str, since_id: str = None) -> list:
+    """Fetch recent mentions of the bot account."""
     url = "https://api.twitter.com/2/tweets/search/recent"
     params = {
-        "query": f"to:@{BOT_HANDLE} !send",
+        "query": f"@{BOT_HANDLE} -is:retweet",
         "max_results": 10,
-        "tweet.fields": "created_at,author_id",
+        "tweet.fields": "created_at,author_id,text",
+        "expansions": "author_id",
+        "user.fields": "username",
     }
     if since_id:
         params["since_id"] = since_id
-    headers = {"Authorization": f"Bearer {access_token}"}
+
     try:
-        r = requests.get(url, params=params, headers=headers, timeout=10)
+        r = requests.get(url, params=params,
+                         headers=get_headers(access_token), timeout=10)
         r.raise_for_status()
-        return r.json().get("data", [])
+        data = r.json()
+
+        tweets = data.get("data", [])
+
+        # Build a map of author_id → username from the includes
+        users = {
+            u["id"]: u["username"]
+            for u in data.get("includes", {}).get("users", [])
+        }
+        # Attach username to each tweet
+        for tweet in tweets:
+            tweet["author_username"] = users.get(tweet["author_id"], tweet["author_id"])
+
+        return tweets
     except Exception as e:
-        print(f"Error fetching tweets: {e}")
+        log.error(f"Failed to fetch mentions: {e}")
         return []
 
 
-# --- OAuth routes (keep as-is for token acquisition) ---
-@app.route('/')
-def login():
-    session.clear()
-    code_verifier = secrets.token_urlsafe(96)[:128]
-    state = secrets.token_hex(8)
-    session['code_verifier'] = code_verifier
-    session['state'] = state
-    session.modified = True
-
-    code_challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(code_verifier.encode()).digest()
-    ).decode().rstrip("=")
-
-    params = {
-        'response_type': 'code',
-        'client_id': CLIENT_ID,
-        'redirect_url': REDIRECT_URL,
-        'scope': 'tweet.read tweet.write users.read offline.access',
-        'state': state,
-        'code_challenge': code_challenge,
-        'code_challenge_method': 'S256',
-    }
-    url = f"https://twitter.com/i/oauth2/authorize?{urlencode(params)}"
-    return redirect(url)
+def post_reply(text: str, in_reply_to_id: str, access_token: str):
+    """Post a reply tweet."""
+    url = "https://api.twitter.com/2/tweets"
+    try:
+        r = requests.post(url,
+            json={
+                "text": text[:280],   # enforce Twitter character limit
+                "reply": {"in_reply_to_tweet_id": in_reply_to_id}
+            },
+            headers={**get_headers(access_token), "Content-Type": "application/json"},
+            timeout=10
+        )
+        r.raise_for_status()
+        log.info(f"Replied to tweet {in_reply_to_id}: {text[:60]}...")
+    except Exception as e:
+        log.error(f"Failed to post reply to {in_reply_to_id}: {e}")
 
 
-@app.route('/callback')
-def callback():
-    code = request.args.get('code')
-    state = request.args.get('state')
-    if not code:
-        return "Error: no code", 400
-    if not state or state != session.get('state'):
-        return "Error: invalid state", 400
-
-    code_verifier = session.get('code_verifier')
-    token_url = 'https://api.twitter.com/2/oauth2/token'
-    data = {
-        'code': code,
-        'grant_type': 'authorization_code',
-        'client_id': CLIENT_ID,
-        'redirect_uri': REDIRECT_URL,
-        'code_verifier': code_verifier,
-    }
-    auth_b64 = base64.b64encode(f"{CLIENT_ID}:{CLIENT_SECRET}".encode()).decode()
-    headers = {
-        'Content-Type': 'application/x-www-form-urlencoded',
-        'Authorization': f"Basic {auth_b64}",
-    }
-    r = requests.post(token_url, data=data, headers=headers, timeout=10)
-    r.raise_for_status()
-    access_token = r.json().get('access_token')
-    session['access_token'] = access_token
-
-    tweets = get_tweets(access_token)
-    results = process_tweets(tweets, access_token)
-    return f"<pre>{'<br>'.join(results)}</pre>"
+def send_dm(user_id: str, text: str, access_token: str):
+    """Send a direct message to a user (for balance and deposit info)."""
+    url = "https://api.twitter.com/2/dm_conversations/with/:participant_id/messages"
+    url = f"https://api.twitter.com/2/dm_conversations/with/{user_id}/messages"
+    try:
+        r = requests.post(url,
+            json={"text": text},
+            headers={**get_headers(access_token), "Content-Type": "application/json"},
+            timeout=10
+        )
+        r.raise_for_status()
+        log.info(f"DM sent to user {user_id}")
+    except Exception as e:
+        log.error(f"Failed to send DM to {user_id}: {e}")
 
 
-# --- FIX 6: Polling loop route for continuous operation ---
-@app.route('/run-bot')
+def is_registered(twitter_handle: str) -> bool:
+    """Check if a user is registered in the database."""
+    with Session() as db:
+        user = db.query(User).filter_by(
+            twitter_handle=twitter_handle.lstrip("@")
+        ).first()
+        return user is not None
+
+
+# ─── Command handlers ─────────────────────────────────────────────────────────
+
+def handle_send(tweet: dict, access_token: str):
+    """Handle: @Solatran send 10 USDT to @friend [on ethereum]"""
+    text        = tweet["text"]
+    tweet_id    = tweet["id"]
+    sender      = tweet["author_username"]
+    author_id   = tweet["author_id"]
+
+    # Check for optional chain specifier first
+    chain = None
+    match = SEND_WITH_CHAIN_PATTERN.search(text)
+    if match:
+        amount_str, token, recipient, chain = match.groups()
+        chain = chain.lower()
+    else:
+        match = SEND_PATTERN.search(text)
+        if not match:
+            return
+        amount_str, token, recipient = match.groups()
+
+    try:
+        amount = float(amount_str)
+    except ValueError:
+        post_reply(f"@{sender} ❌ Invalid amount.", tweet_id, access_token)
+        return
+
+    if amount <= 0:
+        post_reply(f"@{sender} ❌ Amount must be greater than zero.", tweet_id, access_token)
+        return
+
+    # Check sender is registered
+    if not is_registered(sender):
+        post_reply(
+            f"@{sender} ❌ You're not registered. Sign up at {REGISTER_URL} to use Solatran.",
+            tweet_id, access_token
+        )
+        return
+
+    # Check recipient is registered
+    if not is_registered(recipient):
+        post_reply(
+            f"@{sender} ❌ @{recipient} isn't registered on Solatran yet. "
+            f"They can sign up at {REGISTER_URL}",
+            tweet_id, access_token
+        )
+        return
+
+    result = internal_transfer(
+        sender_handle=sender,
+        recipient_handle=recipient,
+        token=token,
+        amount_human=amount,
+        tweet_id=tweet_id,
+        chain=chain,
+    )
+
+    post_reply(result["message"], tweet_id, access_token)
+    log.info(f"Transfer: @{sender} → @{recipient} {amount} {token} | {result['success']}")
+
+
+def handle_balance(tweet: dict, access_token: str):
+    """Handle: @Solatran balance"""
+    tweet_id  = tweet["id"]
+    sender    = tweet["author_username"]
+    author_id = tweet["author_id"]
+
+    if not is_registered(sender):
+        post_reply(
+            f"@{sender} ❌ You're not registered. Sign up at {REGISTER_URL}",
+            tweet_id, access_token
+        )
+        return
+
+    with Session() as db:
+        user = db.query(User).filter_by(twitter_handle=sender).first()
+        balances = get_all_balances(user.id)
+
+    if not balances:
+        msg = f"@{sender} Your Solatran balance is empty. Deposit funds at {REGISTER_URL}"
+        post_reply(msg, tweet_id, access_token)
+        return
+
+    # Format balance list
+    lines = ["Your Solatran balances:"]
+    for b in balances:
+        lines.append(f"  {b['amount']} {b['token']} ({b['chain']})")
+
+    # Send as DM for privacy — balance is sensitive info
+    send_dm(author_id, "\n".join(lines), access_token)
+    post_reply(
+        f"@{sender} 📬 I've sent your balance details via DM.",
+        tweet_id, access_token
+    )
+
+
+def handle_deposit(tweet: dict, access_token: str):
+    """Handle: @Solatran deposit ETH"""
+    text      = tweet["text"]
+    tweet_id  = tweet["id"]
+    sender    = tweet["author_username"]
+    author_id = tweet["author_id"]
+
+    match = DEPOSIT_PATTERN.search(text)
+    token = match.group(1).upper() if match and match.group(1) else None
+
+    if not is_registered(sender):
+        post_reply(
+            f"@{sender} ❌ You're not registered. Sign up at {REGISTER_URL}",
+            tweet_id, access_token
+        )
+        return
+
+    with Session() as db:
+        user = db.query(User).filter_by(twitter_handle=sender).first()
+
+        if token:
+            # Map token to its chain
+            chain_map = {
+                "SOL": "solana", "ETH": "ethereum", "USDT": "tron",
+                "USDC": "ethereum", "BNB": "ethereum",
+            }
+            chain = chain_map.get(token)
+            if not chain:
+                post_reply(f"@{sender} ❌ {token} is not supported.", tweet_id, access_token)
+                return
+            wallet = db.query(Wallet).filter_by(user_id=user.id, chain=chain).first()
+            if not wallet:
+                post_reply(f"@{sender} ❌ No {chain} wallet found.", tweet_id, access_token)
+                return
+            msg = f"Your {token} deposit address ({chain}):\n{wallet.address}"
+        else:
+            # Show all deposit addresses
+            wallets = db.query(Wallet).filter_by(user_id=user.id).all()
+            lines = ["Your Solatran deposit addresses:"]
+            for w in wallets:
+                lines.append(f"\n{w.chain.upper()}:\n{w.address}")
+            msg = "\n".join(lines)
+
+    # Send as DM — address is sensitive
+    send_dm(author_id, msg, access_token)
+    post_reply(
+        f"@{sender} 📬 I've sent your deposit address via DM.",
+        tweet_id, access_token
+    )
+
+
+def handle_withdraw(tweet: dict, access_token: str):
+    """Handle: @Solatran withdraw 0.1 ETH 0xABC..."""
+    text     = tweet["text"]
+    tweet_id = tweet["id"]
+    sender   = tweet["author_username"]
+
+    match = WITHDRAW_PATTERN.search(text)
+    if not match:
+        post_reply(
+            f"@{sender} ❌ Invalid format. Use: @{BOT_HANDLE} withdraw [amount] [token] [address]",
+            tweet_id, access_token
+        )
+        return
+
+    amount_str, token, to_address = match.groups()
+
+    try:
+        amount = float(amount_str)
+    except ValueError:
+        post_reply(f"@{sender} ❌ Invalid amount.", tweet_id, access_token)
+        return
+
+    if not is_registered(sender):
+        post_reply(
+            f"@{sender} ❌ You're not registered. Sign up at {REGISTER_URL}",
+            tweet_id, access_token
+        )
+        return
+
+    post_reply(
+        f"@{sender} ⏳ Processing your withdrawal of {amount} {token}...",
+        tweet_id, access_token
+    )
+
+    result = withdraw(
+        sender_handle=sender,
+        token=token,
+        amount_human=amount,
+        to_address=to_address,
+    )
+
+    post_reply(result["message"], tweet_id, access_token)
+    log.info(f"Withdrawal: @{sender} {amount} {token} → {to_address} | {result['success']}")
+
+
+def handle_help(tweet: dict, access_token: str):
+    """Handle unrecognized commands with a help message."""
+    tweet_id = tweet["id"]
+    sender   = tweet["author_username"]
+    post_reply(
+        f"@{sender} Here's how to use Solatran:\n"
+        f"• send [amount] [token] to @user\n"
+        f"• balance\n"
+        f"• deposit [token]\n"
+        f"• withdraw [amount] [token] [address]\n"
+        f"Register at {REGISTER_URL}",
+        tweet_id, access_token
+    )
+
+
+# ─── Tweet router ─────────────────────────────────────────────────────────────
+
+def route_tweet(tweet: dict, access_token: str):
+    """Decide which handler to call based on tweet content."""
+    text = tweet["text"].lower()
+
+    # Strip the bot mention before matching
+    clean = re.sub(rf'@{BOT_HANDLE}', '', text, flags=re.IGNORECASE).strip()
+
+    if SEND_PATTERN.search(clean) or SEND_WITH_CHAIN_PATTERN.search(clean):
+        handle_send(tweet, access_token)
+    elif BALANCE_PATTERN.search(clean):
+        handle_balance(tweet, access_token)
+    elif DEPOSIT_PATTERN.search(clean):
+        handle_deposit(tweet, access_token)
+    elif WITHDRAW_PATTERN.search(clean):
+        handle_withdraw(tweet, access_token)
+    else:
+        handle_help(tweet, access_token)
+
+
+# ─── Main polling loop ────────────────────────────────────────────────────────
+
 def run_bot():
-    access_token = session.get('access_token')
+    log.info(f"🚀 Solatran bot starting — polling every {POLL_INTERVAL}s")
+    access_token = get_access_token()
     if not access_token:
-        return redirect('/')
+        log.error("❌ Could not get access token. Check TWITTER_CLIENT_ID and SECRET in .env")
+        return
+
     since_id = None
-    cycles = 0
-    while cycles < 5:  # limit for web context; use a background thread/worker in prod
-        tweets = get_tweets(access_token, since_id)
-        if tweets:
-            since_id = tweets[0]['id']
-            process_tweets(tweets, access_token)
-        time.sleep(60)
-        cycles += 1
-    return "Bot cycle complete"
+    processed = set()   # in-memory dedup (DB handles persistent dedup)
+
+    while True:
+        try:
+            log.info("Checking mentions...")
+            tweets = get_mentions(access_token, since_id)
+
+            if tweets:
+                # Update since_id to the newest tweet so we don't re-fetch old ones
+                since_id = tweets[0]["id"]
+
+                for tweet in reversed(tweets):   # process oldest first
+                    tweet_id = tweet["id"]
+                    if tweet_id in processed:
+                        continue
+                    processed.add(tweet_id)
+
+                    sender = tweet.get("author_username", "unknown")
+                    log.info(f"Processing tweet {tweet_id} from @{sender}: {tweet['text'][:60]}")
+                    route_tweet(tweet, access_token)
+
+            else:
+                log.info("No new mentions.")
+
+        except Exception as e:
+            log.error(f"Unexpected error in polling loop: {e}")
+
+        time.sleep(POLL_INTERVAL)
 
 
-if __name__ == '__main__':
-    app.run(debug=True, use_reloader=False, host='0.0.0.0', port=5000)
+if __name__ == "__main__":
+    run_bot()
