@@ -1,1 +1,7 @@
-keypair.json\n.env
+.env
+keypair.json
+*.log
+__pycache__/
+.venv/
+*.pyc
+solatran.env

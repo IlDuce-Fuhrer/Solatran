@@ -1,6 +1,30 @@
+# Web framework
+flask==3.0.3
+gunicorn==23.0.0
+
+# Database
+sqlalchemy==2.0.36
+psycopg2-binary==2.9.10
+
+# Twitter API
+requests==2.32.3
+
+# Solana
 solana==0.33.0
 solders==0.21.0
-flask==3.0.3
-requests==2.32.3
+
+# Ethereum
+web3==7.16.0
+eth-account==0.13.7
+
+# Tron
+tronpy==0.6.2
+
+# Wallet encryption
+cryptography==48.0.0
+
+# Fetch.ai agent
+uagents>=0.14.0
+
+# Environment
 python-dotenv==1.0.1
-gunicorn==23.0.0

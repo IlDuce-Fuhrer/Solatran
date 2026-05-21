@@ -18,7 +18,6 @@ import re
 from datetime import datetime, timedelta
 from uuid import uuid4
 from dotenv import load_dotenv
-
 from uagents import Agent, Protocol, Context
 from uagents_core.contrib.protocols.chat import (
     ChatAcknowledgement,
@@ -39,7 +38,7 @@ from transfer import (
 
 load_dotenv()
 
-# ─── Agent setup ──────────────────────────────────────────────────────────────
+# Agent setup
 agent = Agent(
     name="solatran",
     seed=os.getenv("AGENT_SEED", "solatran-default-seed-change-this"),
@@ -51,7 +50,7 @@ chat_proto = Protocol(spec=chat_protocol_spec)
 
 REGISTER_URL = "https://solatran.xyz"
 
-# ─── Spending limits (per user per day) ───────────────────────────────────────
+# Spending limits (per user per day) 
 DAILY_LIMITS = {
     "SOL":  100.0,
     "ETH":  1.0,
@@ -60,7 +59,7 @@ DAILY_LIMITS = {
     "BNB":  5.0,
 }
 
-# ─── Command patterns (same as main.py) ───────────────────────────────────────
+# Command patterns (same as main.py)
 SEND_PATTERN         = re.compile(r'send\s+([\d.]+)\s+([A-Z]+)\s+to\s+@(\w+)', re.IGNORECASE)
 SEND_WITH_CHAIN      = re.compile(r'send\s+([\d.]+)\s+([A-Z]+)\s+to\s+@(\w+)\s+on\s+(\w+)', re.IGNORECASE)
 WITHDRAW_PATTERN     = re.compile(r'withdraw\s+([\d.]+)\s+([A-Z]+)\s+([A-Za-z0-9]{20,})', re.IGNORECASE)
@@ -70,7 +69,7 @@ HISTORY_PATTERN      = re.compile(r'history', re.IGNORECASE)
 LIMITS_PATTERN       = re.compile(r'limits?', re.IGNORECASE)
 
 
-# ─── Fraud / limit checks ─────────────────────────────────────────────────────
+# Fraud / limit checks
 
 def get_daily_spent(user_id: int, token: str) -> float:
     """Return how much of a token the user has sent in the last 24 hours."""
@@ -118,7 +117,7 @@ def is_registered(handle: str) -> tuple[bool, User | None]:
         return (True, user) if user else (False, None)
 
 
-# ─── Response builder ─────────────────────────────────────────────────────────
+# Response builder
 
 def make_reply(text: str) -> ChatMessage:
     return ChatMessage(
@@ -128,7 +127,7 @@ def make_reply(text: str) -> ChatMessage:
     )
 
 
-# ─── Command handlers ─────────────────────────────────────────────────────────
+# Command handlers
 
 def handle_send(text: str, sender_handle: str, tweet_id: str = None) -> str:
     """Process a send command with full validation."""
@@ -313,7 +312,7 @@ def handle_help() -> str:
     )
 
 
-# ─── Message router ───────────────────────────────────────────────────────────
+# Message router
 
 def route_message(text: str, sender_address: str) -> str:
     """
@@ -358,7 +357,7 @@ def route_message(text: str, sender_address: str) -> str:
         return handle_help()
 
 
-# ─── Chat protocol handlers ───────────────────────────────────────────────────
+# Chat protocol handlers
 
 @chat_proto.on_message(ChatMessage)
 async def handle_message(ctx: Context, sender: str, msg: ChatMessage):
@@ -392,7 +391,7 @@ async def handle_ack(ctx: Context, sender: str, msg: ChatAcknowledgement):
     ctx.logger.info(f"ACK from {sender} for {msg.acknowledged_msg_id}")
 
 
-# ─── Run ──────────────────────────────────────────────────────────────────────
+# Run
 
 agent.include(chat_proto, publish_manifest=True)
 

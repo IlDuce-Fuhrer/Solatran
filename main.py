@@ -18,7 +18,7 @@ from transfer import internal_transfer, withdraw, get_all_balances, to_smallest_
 
 load_dotenv()
 
-# ─── Logging ──────────────────────────────────────────────────────────────────
+# Logging
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -29,14 +29,14 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ─── Config ───────────────────────────────────────────────────────────────────
+# Config
 BOT_HANDLE    = os.getenv("TWITTER_BOT_HANDLE", "Solatran")
 CLIENT_ID     = os.getenv("TWITTER_CLIENT_ID")
 CLIENT_SECRET = os.getenv("TWITTER_CLIENT_SECRET")
 POLL_INTERVAL = 60   # seconds between each mention check
-REGISTER_URL  = "https://solatran.xyz"   # update when deployed
+REGISTER_URL  = "https://solatran.com"   # update when deployed
 
-# ─── Command patterns ─────────────────────────────────────────────────────────
+# Command patterns 
 # @Solatran send 10 USDT to @friend
 SEND_PATTERN = re.compile(
     r'send\s+([\d.]+)\s+([A-Z]+)\s+to\s+@(\w+)',
@@ -61,7 +61,7 @@ DEPOSIT_PATTERN = re.compile(
 BALANCE_PATTERN = re.compile(r'balance', re.IGNORECASE)
 
 
-# ─── Twitter API helpers ──────────────────────────────────────────────────────
+# Twitter API helpers
 
 def get_headers(access_token: str) -> dict:
     return {"Authorization": f"Bearer {access_token}"}
@@ -171,7 +171,7 @@ def is_registered(twitter_handle: str) -> bool:
         return user is not None
 
 
-# ─── Command handlers ─────────────────────────────────────────────────────────
+# Command handlers
 
 def handle_send(tweet: dict, access_token: str):
     """Handle: @Solatran send 10 USDT to @friend [on ethereum]"""
@@ -378,7 +378,7 @@ def handle_help(tweet: dict, access_token: str):
     )
 
 
-# ─── Tweet router ─────────────────────────────────────────────────────────────
+# Tweet router
 
 def route_tweet(tweet: dict, access_token: str):
     """Decide which handler to call based on tweet content."""
@@ -399,7 +399,7 @@ def route_tweet(tweet: dict, access_token: str):
         handle_help(tweet, access_token)
 
 
-# ─── Main polling loop ────────────────────────────────────────────────────────
+# Main polling loop
 
 def run_bot():
     log.info(f"🚀 Solatran bot starting — polling every {POLL_INTERVAL}s")
