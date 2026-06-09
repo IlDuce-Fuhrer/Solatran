@@ -28,3 +28,4 @@ uagents>=0.14.0
 
 # Environment
 python-dotenv==1.0.1
+flask-session==0.8.0

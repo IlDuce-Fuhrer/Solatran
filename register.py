@@ -19,6 +19,7 @@ from flask import Flask, redirect, request, session, jsonify, render_template_st
 from dotenv import load_dotenv
 from models import Session, User, Wallet, init_db
 from wallets import generate_all_wallets
+from flask_session import Session as FlaskSession
 
 load_dotenv()
 
@@ -28,6 +29,8 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'None'
 app.config['SESSION_COOKIE_SECURE'] = True
 app.config['SESSION_COOKIE_HTTPONLY'] = True
 app.config['SESSION_COOKIE_NAME'] = 'solatran_session'
+app.config['SESSION_TYPE'] = 'filesystem'
+FlaskSession(app)
 
 CLIENT_ID    = os.getenv("TWITTER_CLIENT_ID")
 CLIENT_SECRET = os.getenv("TWITTER_CLIENT_SECRET")
