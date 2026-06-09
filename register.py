@@ -204,7 +204,7 @@ def login():
     params = {
         'response_type': 'code',
         'client_id': CLIENT_ID,
-        'redirect_url': REDIRECT_URL,
+        'redirect_uri': REDIRECT_URL,
         'scope': 'tweet.read tweet.write users.read offline.access',
         'state': state,
         'code_challenge': code_challenge,
