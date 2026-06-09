@@ -223,18 +223,15 @@ def callback():
     code  = request.args.get('code')
     state = request.args.get('state')
 
+    print(f"CALLBACK: code={code[:10] if code else None}, state={state}, session_state={session.get('state')}")
+
     if not code:
         return render_template_string(ERROR_HTML,
             message="No authorization code received from Twitter."), 400
     if not state or state != session.get('state'):
         return render_template_string(ERROR_HTML,
-            message="Invalid state parameter. Please try again."), 400
-
-    code_verifier = session.get('code_verifier')
-    if not code_verifier:
-        return render_template_string(ERROR_HTML,
-            message="Session expired. Please try again."), 400
-
+            message=f"State mismatch. Got {state}, expected {session.get('state')}"), 400
+    
     # Exchange code for access token
     auth_b64 = base64.b64encode(f"{CLIENT_ID}:{CLIENT_SECRET}".encode()).decode()
     try:
