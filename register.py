@@ -209,7 +209,7 @@ def login():
         'response_type': 'code',
         'client_id': CLIENT_ID,
         'redirect_uri': REDIRECT_URL,
-        'scope': 'tweet.read tweet.write users.read offline.access',
+        'scope': 'tweet.read tweet.write users.read',
         'state': state,
         'code_challenge': code_challenge,
         'code_challenge_method': 'S256',
