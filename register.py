@@ -205,18 +205,18 @@ def login():
         hashlib.sha256(code_verifier.encode()).digest()
     ).decode().rstrip("=")
 
-    params = {
-        'response_type': 'code',
-        'client_id': CLIENT_ID,
-        'redirect_uri': REDIRECT_URL,
-        'scope': 'tweet.read tweet.write users.read',
-        'state': state,
-        'code_challenge': code_challenge,
-        'code_challenge_method': 'S256',
-    }
-    url = f"https://twitter.com/i/oauth2/authorize?{urlencode(params)}"
+    from urllib.parse import quote
+    params = (
+        f"response_type=code"
+        f"&client_id={CLIENT_ID}"
+        f"&redirect_uri={quote(REDIRECT_URL, safe='')}"
+        f"&scope=tweet.read%20tweet.write%20users.read"
+        f"&state={state}"
+        f"&code_challenge={code_challenge}"
+        f"&code_challenge_method=S256"
+    )
+    url = f"https://twitter.com/i/oauth2/authorize?{params}"
     return redirect(url)
-
 
 @app.route('/callback')
 def callback():
